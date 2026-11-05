@@ -1,0 +1,13 @@
+{
+  "name": "naruto-xp-card",
+  "version": "1.0.0",
+  "description": "Custom Naruto XP Card API",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "sharp": "^0.34.3"
+  }
+}
