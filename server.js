@@ -6,14 +6,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 const BACKGROUND =
-  "https://i.ibb.co/vC6fQSDH/file-00000000c15481faa0db012c7114644f.png";
-
-function escapeXML(value) {
-  return String(value).replace(/[<>&"']/g, char => ({
-    "<": "&lt;", ">": "&gt;", "&": "&amp;",
-    '"': "&quot;", "'": "&apos;"
-  })[char]);
-}
+  "https://i.ibb.co/RpTdCFz6/file-00000000453c821183c32637c23f63a0.png";
 
 app.get("/", (req, res) => {
   res.send("Naruto XP Card API is running!");
@@ -22,114 +15,106 @@ app.get("/", (req, res) => {
 app.get("/xp", async (req, res) => {
   try {
     const {
-      avatar,
-      username = "Player",
-      xp = 0,
-      maxxp = 100,
-      level = 1
+      avatar = "https://cdn.discordapp.com/embed/avatars/0.png",
+      username = "Member",
+      xp = "0",
+      maxxp = "100",
+      level = "1"
     } = req.query;
 
-    if (!avatar) {
-      return res.status(400).send("Avatar URL is required");
-    }
-
-    const bgResponse = await fetch(BACKGROUND);
-    if (!bgResponse.ok) throw new Error("Background download failed");
-
-    const bg = Buffer.from(await bgResponse.arrayBuffer());
-
-    // Fixed canvas dimensions
-    const width = 1536;
+    const width = 1648;
     const height = 1024;
 
-    const background = await sharp(bg)
-      .resize(width, height, { fit: "cover" })
-      .png()
-      .toBuffer();
+    const bgResponse = await fetch(BACKGROUND);
+    if (!bgResponse.ok) throw new Error("Background image failed");
 
-    // Download avatar; use fallback if unavailable
+    const background = Buffer.from(await bgResponse.arrayBuffer());
+
     let avatarBuffer;
-
     try {
-      const avatarURL = new URL(avatar);
-      if (avatarURL.protocol !== "https:") throw new Error("HTTPS required");
-
-      const response = await fetch(avatarURL, {
-        signal: AbortSignal.timeout(10000)
-      });
-
-      if (!response.ok) throw new Error("Avatar unavailable");
-
-      avatarBuffer = Buffer.from(await response.arrayBuffer());
+      const avatarResponse = await fetch(avatar);
+      if (!avatarResponse.ok) throw new Error("Avatar failed");
+      avatarBuffer = Buffer.from(await avatarResponse.arrayBuffer());
     } catch {
-      avatarBuffer = Buffer.from(`
-        <svg width="330" height="330">
-          <circle cx="165" cy="165" r="165" fill="#164caa"/>
-          <text x="165" y="190" font-size="90"
-            text-anchor="middle" fill="white">?</text>
-        </svg>
-      `);
+      avatarBuffer = await sharp({
+        create: {
+          width: 340,
+          height: 340,
+          channels: 4,
+          background: "#5865F2"
+        }
+      }).png().toBuffer();
     }
 
-    const avatarImage = await sharp(avatarBuffer)
-      .resize(330, 330, { fit: "cover" })
-      .png()
-      .toBuffer();
-
-    const name = escapeXML(username).slice(0, 24);
     const currentXP = Math.max(0, Number(xp) || 0);
     const maximumXP = Math.max(1, Number(maxxp) || 100);
-    const currentLevel = Math.max(0, Number(level) || 0);
-    const progress = Math.min(1, currentXP / maximumXP);
+    const progress = Math.min(currentXP / maximumXP, 1);
 
-    const svg = `
-    <svg width="${width}" height="${height}"
-      viewBox="0 0 ${width} ${height}">
-      <defs>
-        <clipPath id="circle">
-          <circle cx="315" cy="360" r="165"/>
-        </clipPath>
-      </defs>
+    const safeName = String(username)
+      .replace(/[&<>"']/g, "")
+      .slice(0, 22);
 
-      <image href="data:image/png;base64,${avatarImage.toString("base64")}"
-        x="150" y="195" width="330" height="330"
-        clip-path="url(#circle)"/>
-
-      <text x="315" y="615" text-anchor="middle"
-        font-size="48" fill="white" font-weight="bold">
-        ${name}
-      </text>
-
-      <rect x="310" y="720" width="390" height="25"
-        rx="12" fill="#073b83"/>
-
-      <rect x="310" y="720" width="${390 * progress}" height="25"
-        rx="12" fill="#00eaff"/>
-
-      <text x="790" y="750" font-size="45"
-        fill="white" font-weight="bold">
-        ${currentXP}/${maximumXP}
-      </text>
-
-      <text x="760" y="835" font-size="45"
-        fill="white" font-weight="bold">
-        ${currentLevel}
-      </text>
-    </svg>`;
-
-    const output = await sharp(background)
-      .composite([{ input: Buffer.from(svg), left: 0, top: 0 }])
+    const avatarCircle = await sharp(avatarBuffer)
+      .resize(340, 340, { fit: "cover" })
+      .composite([{
+        input: Buffer.from(
+          '<svg width="340" height="340"><circle cx="170" cy="170" r="169" fill="white"/></svg>'
+        ),
+        blend: "dest-in"
+      }])
       .png()
       .toBuffer();
 
-    res.type("png").send(output);
+    const xpWidth = Math.round(375 * progress);
+
+    const overlay = Buffer.from(`
+      <svg width="${width}" height="${height}">
+        <defs>
+          <linearGradient id="bar" x1="0" x2="1">
+            <stop offset="0%" stop-color="#00aaff"/>
+            <stop offset="100%" stop-color="#00ffff"/>
+          </linearGradient>
+        </defs>
+
+        <rect x="315" y="705" width="575" height="78"
+          rx="8" fill="#06123c"/>
+        <rect x="328" y="737" width="375" height="40"
+          rx="20" fill="#071b53" stroke="#00caff" stroke-width="2"/>
+        <rect x="328" y="737" width="${xpWidth}" height="40"
+          rx="20" fill="url(#bar)"/>
+
+        <text x="720" y="776" font-size="49" font-weight="bold"
+          fill="white">${currentXP}/${maximumXP}</text>
+
+        <rect x="600" y="817" width="300" height="75"
+          rx="20" fill="#06123c"/>
+
+        <text x="735" y="869" font-size="43" font-weight="bold"
+          text-anchor="middle" fill="#ffffff">Level ${Number(level) || 1}</text>
+
+        <text x="330" y="627" font-size="43" font-weight="bold"
+          text-anchor="middle" fill="#ffffff">${safeName}</text>
+      </svg>
+    `);
+
+    const image = await sharp(background)
+      .resize(width, height, { fit: "fill" })
+      .composite([
+        { input: avatarCircle, left: 153, top: 190 },
+        { input: overlay, left: 0, top: 0 }
+      ])
+      .png()
+      .toBuffer();
+
+    res.set("Content-Type", "image/png");
+    res.send(image);
 
   } catch (error) {
-    console.error("XP CARD ERROR:", error);
-    res.status(500).send(error.message);
+    console.error(error);
+    res.status(500).send("Image generation failed");
   }
 });
 
 app.listen(PORT, () => {
-  console.log("Naruto XP API running on " + PORT);
+  console.log(`XP Card API running on port ${PORT}`);
 });
