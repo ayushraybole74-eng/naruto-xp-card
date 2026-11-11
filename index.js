@@ -65,6 +65,7 @@ let lavalinkUrl;
 
 try {
   const rawHost = process.env.LAVALINK_HOST.trim();
+
   lavalinkUrl = new URL(
     rawHost.includes("://") ? rawHost : `https://${rawHost}`
   );
@@ -74,11 +75,13 @@ try {
 }
 
 const lavalinkHost = lavalinkUrl.hostname;
+
 const lavalinkPort = Number(
   process.env.LAVALINK_PORT ||
   lavalinkUrl.port ||
   (lavalinkUrl.protocol === "https:" ? 443 : 2333)
 );
+
 const lavalinkSecure =
   process.env.LAVALINK_SECURE === "false"
     ? false
@@ -249,7 +252,9 @@ async function getOrCreatePlayer(interaction, voice) {
   let player = client.lavalink.getPlayer(interaction.guildId);
 
   if (player && player.voiceChannelId !== voice.id) {
-    throw new Error("DARK DJ is already connected to another voice channel.");
+    throw new Error(
+      "DARK DJ is already connected to another voice channel."
+    );
   }
 
   if (!player) {
@@ -301,10 +306,6 @@ client.lavalink = new LavalinkManager({
       autoReconnect: true,
       destroyPlayer: false
     }
-
-    // onEmptyQueue intentionally omitted.
-    // This keeps the player from being auto-destroyed
-    // when the queue becomes empty.
   }
 });
 
@@ -324,7 +325,10 @@ client.lavalink.nodeManager.on("error", (node, error) => {
 });
 
 client.lavalink.on("trackStart", (player, track) => {
-  console.log("Now playing:", track?.info?.title || "Unknown track");
+  console.log(
+    "Now playing:",
+    track?.info?.title || "Unknown track"
+  );
 });
 
 client.lavalink.on("trackError", (player, track, payload) => {
@@ -431,6 +435,7 @@ client.on("interactionCreate", async interaction => {
       searchSessions.delete(sessionId);
 
       const details = trackDetails(selectedTrack);
+
       const embed = makeEmbed(
         "💙 Added to DARK DJ",
         `**${details.title}**\n` +
@@ -859,4 +864,11 @@ client.on("interactionCreate", async interaction => {
         ...message,
         ephemeral: true
       }).catch(() => {});
-    
+    }
+  }
+});
+
+// ================= LOGIN =================
+
+client.login(process.env.DISCORD_TOKEN);
+      
