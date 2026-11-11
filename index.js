@@ -11,25 +11,11 @@ const {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
-  StringSelectMenuBuilder
+  StringSelectMenuBuilder,
+  StringSelectMenuOptionBuilder
 } = require("discord.js");
 
 const { LavalinkManager } = require("lavalink-client");
-const crypto = require("node:crypto");
-
-const requiredEnv = [
-  "DISCORD_TOKEN",
-  "CLIENT_ID",
-  "LAVALINK_HOST",
-  "LAVALINK_PASSWORD"
-];
-
-for (const key of requiredEnv) {
-  if (!process.env[key]) {
-    console.error(`Missing environment variable: ${key}`);
-    process.exit(1);
-  }
-}
 
 const client = new Client({
   intents: [
@@ -38,277 +24,225 @@ const client = new Client({
   ]
 });
 
-const host = process.env.LAVALINK_HOST
-  .replace(/^https?:\/\//, "")
-  .replace(/^wss?:\/\//, "")
-  .replace(/\/$/, "");
-
-const port = Number(process.env.LAVALINK_PORT || 443);
-const secure =
-  String(process.env.LAVALINK_SECURE || "true").toLowerCase() === "true";
-
-client.lavalink = new LavalinkManager({
-  nodes: [
-    {
-      id: "DARK-DJ",
-      host,
-      port,
-      authorization: process.env.LAVALINK_PASSWORD,
-      secure
-    }
-  ],
-
-  sendToShard: (guildId, payload) => {
-    const guild = client.guilds.cache.get(guildId);
-    if (guild) guild.shard.send(payload);
-  },
-
-  client: {
-    id: process.env.CLIENT_ID,
-    username: "DARK DJ"
-  },
-
-  autoSkip: true,
-
-  playerOptions: {
-    defaultSearchPlatform: "ytmsearch",
-    clientBasedPositionUpdateInterval: 150,
-    volumeDecrementer: 1,
-
-    onDisconnect: {
-      autoReconnect: true,
-      destroyPlayer: false
-    },
-
-    onEmptyQueue: {
-      destroyAfterMs: -1
-    },
-
-    useUnresolvedData: true
-  },
-
-  queueOptions: {
-    maxPreviousTracks: 25
-  }
-});
-
+const MAX_VOLUME = 247;
 const searchSessions = new Map();
 
-function formatTime(ms) {
-  if (!Number.isFinite(ms) || ms <= 0) return "Live";
+client.on("error", error => console.error("CLIENT ERROR:", error));
+process.on("unhandledRejection", error => console.error("UNHANDLED:", error));
+process.on("uncaughtException", error => console.error("UNCAUGHT:", error));
+
+const commands = [
+  new SlashCommandBuilder()
+    .setName("play")
+    .setDescription("Search and play a song")
+    .addStringOption(o =>
+      o.setName("song")
+        .setDescription("Song name or link")
+        .setRequired(true)
+    ),
+
+  new SlashCommandBuilder()
+    .setName("join")
+    .setDescription("Join your voice channel"),
+
+  new SlashCommandBuilder()
+    .setName("pause")
+    .setDescription("Pause music"),
+
+  new SlashCommandBuilder()
+    .setName("resume")
+    .setDescription("Resume music"),
+
+  new SlashCommandBuilder()
+    .setName("skip")
+    .setDescription("Skip current song"),
+
+  new SlashCommandBuilder()
+    .setName("stop")
+    .setDescription("Stop music and clear queue"),
+
+  new SlashCommandBuilder()
+    .setName("disconnect")
+    .setDescription("Leave voice channel"),
+
+  new SlashCommandBuilder()
+    .setName("queue")
+    .setDescription("Show music queue"),
+
+  new SlashCommandBuilder()
+    .setName("volume")
+    .setDescription("Set volume")
+    .addIntegerOption(o =>
+      o.setName("level")
+        .setDescription("Volume 1-247")
+        .setMinValue(1)
+        .setMaxValue(MAX_VOLUME)
+        .setRequired(true)
+    ),
+
+  new SlashCommandBuilder()
+    .setName("loop")
+    .setDescription("Set music loop mode")
+    .addStringOption(o =>
+      o.setName("mode")
+        .setDescription("Choose loop mode")
+        .setRequired(true)
+        .addChoices(
+          { name: "Off", value: "off" },
+          { name: "Song", value: "song" },
+          { name: "Queue", value: "queue" }
+        )
+    )
+].map(c => c.toJSON());
+
+function makeEmbed(title, description, color = 0x5865F2) {
+  return new EmbedBuilder()
+    .setColor(color)
+    .setTitle(title)
+    .setDescription(description)
+    .setFooter({ text: "DARK DJ | Music System" });
+}
+
+function durationText(ms) {
+  if (!Number.isFinite(ms) || ms <= 0) return "LIVE";
 
   const total = Math.floor(ms / 1000);
   const hours = Math.floor(total / 3600);
   const minutes = Math.floor((total % 3600) / 60);
   const seconds = total % 60;
 
-  return hours > 0
+  return hours
     ? `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`
     : `${minutes}:${String(seconds).padStart(2, "0")}`;
 }
 
-function trackTitle(track) {
-  return track?.info?.title || "Unknown track";
-}
+function playerControls() {
+  return [
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId("darkdj_pause")
+        .setLabel("Pause")
+        .setStyle(ButtonStyle.Secondary),
 
-function makeNowPlayingEmbed(track, requester) {
-  const info = track?.info || {};
-  const url = info.uri;
-  const title = trackTitle(track);
+      new ButtonBuilder()
+        .setCustomId("darkdj_resume")
+        .setLabel("Resume")
+        .setStyle(ButtonStyle.Success),
 
-  const embed = new EmbedBuilder()
-    .setColor(0x5865F2)
-    .setTitle("🎶 Now Playing")
-    .setDescription(url ? `[${title}](${url})` : title)
-    .addFields(
-      {
-        name: "Artist",
-        value: info.author || "Unknown",
-        inline: true
-      },
-      {
-        name: "Duration",
-        value: formatTime(info.duration || info.length),
-        inline: true
-      },
-      {
-        name: "Requested By",
-        value: requester
-          ? `<@${requester.id || requester}>`
-          : "Unknown",
-        inline: true
-      }
+      new ButtonBuilder()
+        .setCustomId("darkdj_skip")
+        .setLabel("Skip")
+        .setStyle(ButtonStyle.Primary),
+
+      new ButtonBuilder()
+        .setCustomId("darkdj_shuffle")
+        .setLabel("Shuffle")
+        .setStyle(ButtonStyle.Secondary),
+
+      new ButtonBuilder()
+        .setCustomId("darkdj_stop")
+        .setLabel("Stop")
+        .setStyle(ButtonStyle.Danger)
+    ),
+
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId("darkdj_vol_down")
+        .setLabel("Volume -")
+        .setStyle(ButtonStyle.Secondary),
+
+      new ButtonBuilder()
+        .setCustomId("darkdj_vol_up")
+        .setLabel("Volume +")
+        .setStyle(ButtonStyle.Secondary),
+
+      new ButtonBuilder()
+        .setCustomId("darkdj_disconnect")
+        .setLabel("Disconnect")
+        .setStyle(ButtonStyle.Danger)
     )
-    .setFooter({
-      text: "DARK DJ • Music Player"
-    });
-
-  const image = info.artworkUrl || info.thumbnail;
-
-  if (image) embed.setThumbnail(image);
-
-  return embed;
+  ];
 }
 
-function controlRows(guildId) {
-  const first = new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId(`dj:${guildId}:pause`)
-      .setLabel("Pause")
-      .setStyle(ButtonStyle.Secondary),
-
-    new ButtonBuilder()
-      .setCustomId(`dj:${guildId}:resume`)
-      .setLabel("Resume")
-      .setStyle(ButtonStyle.Secondary),
-
-    new ButtonBuilder()
-      .setCustomId(`dj:${guildId}:skip`)
-      .setLabel("Skip")
-      .setStyle(ButtonStyle.Secondary),
-
-    new ButtonBuilder()
-      .setCustomId(`dj:${guildId}:shuffle`)
-      .setLabel("Shuffle")
-      .setStyle(ButtonStyle.Secondary),
-
-    new ButtonBuilder()
-      .setCustomId(`dj:${guildId}:stop`)
-      .setLabel("Stop")
-      .setStyle(ButtonStyle.Danger)
-  );
-
-  const second = new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId(`dj:${guildId}:vol_down`)
-      .setLabel("Volume -")
-      .setStyle(ButtonStyle.Secondary),
-
-    new ButtonBuilder()
-      .setCustomId(`dj:${guildId}:vol_up`)
-      .setLabel("Volume +")
-      .setStyle(ButtonStyle.Secondary),
-
-    new ButtonBuilder()
-      .setCustomId(`dj:${guildId}:disconnect`)
-      .setLabel("Disconnect")
-      .setStyle(ButtonStyle.Danger)
-  );
-
-  return [first, second];
+function getVoiceChannel(interaction) {
+  return interaction.member?.voice?.channel ?? null;
 }
 
-async function getPlayer(interaction, connectIfNeeded = false) {
-  const voiceChannel = interaction.member?.voice?.channel;
-
-  if (!voiceChannel) {
-    throw new Error("Pehle kisi voice channel me join karo.");
-  }
-
+async function getOrCreatePlayer(interaction, voice) {
   let player = client.lavalink.getPlayer(interaction.guildId);
 
-  if (
-    player &&
-    player.voiceChannelId &&
-    player.voiceChannelId !== voiceChannel.id
-  ) {
-    throw new Error(`Bot already <#${player.voiceChannelId}> me hai.`);
-  }
-
-  if (!player && connectIfNeeded) {
-    player = await client.lavalink.createPlayer({
+  if (!player) {
+    player = client.lavalink.createPlayer({
       guildId: interaction.guildId,
-      voiceChannelId: voiceChannel.id,
+      voiceChannelId: voice.id,
       textChannelId: interaction.channelId,
       selfDeaf: true,
       volume: 100
     });
   }
 
-  if (!player) {
-    throw new Error(
-      "Music player active nahi hai. Pehle /join ya /play use karo."
-    );
-  }
-
-  if (connectIfNeeded && !player.connected) {
-    player.voiceChannelId = voiceChannel.id;
-    player.textChannelId = interaction.channelId;
+  if (!player.connected) {
     await player.connect();
   }
 
   return player;
 }
 
-const commands = [
-  new SlashCommandBuilder()
-    .setName("join")
-    .setDescription("Bot ko voice channel me join karaye"),
+async function setPlayerVolume(player, volume) {
+  const safeVolume = Math.max(1, Math.min(MAX_VOLUME, Math.round(volume)));
+  await player.setVolume(safeVolume);
+  return safeVolume;
+}
 
-  new SlashCommandBuilder()
-    .setName("play")
-    .setDescription("YouTube Music par song search kare")
-    .addStringOption(option =>
-      option
-        .setName("song")
-        .setDescription("Song name ya link")
-        .setRequired(true)
-    ),
+client.lavalink = new LavalinkManager({
+  nodes: [
+    {
+      id: "DARK-DJ",
+      host: process.env.LAVALINK_HOST,
+      port: Number(process.env.LAVALINK_PORT || 443),
+      authorization: process.env.LAVALINK_PASSWORD,
+      secure: process.env.LAVALINK_SECURE !== "false"
+    }
+  ],
 
-  new SlashCommandBuilder()
-    .setName("pause")
-    .setDescription("Current song pause kare"),
+  sendToShard: (guildId, payload) => {
+    client.guilds.cache.get(guildId)?.shard?.send(payload);
+  },
 
-  new SlashCommandBuilder()
-    .setName("resume")
-    .setDescription("Paused song resume kare"),
+  autoSkip: true,
 
-  new SlashCommandBuilder()
-    .setName("skip")
-    .setDescription("Current song skip kare"),
+  playerOptions: {
+    defaultSearchPlatform: "scsearch",
+    onDisconnect: {
+      autoReconnect: true,
+      destroyPlayer: false
+    }
+  },
 
-  new SlashCommandBuilder()
-    .setName("stop")
-    .setDescription("Song stop karke queue clear kare"),
+  client: {
+    id: process.env.CLIENT_ID,
+    username: "DARK DJ"
+  }
+});
 
-  new SlashCommandBuilder()
-    .setName("disconnect")
-    .setDescription("Bot ko voice channel se disconnect kare"),
+client.on("raw", data => {
+  client.lavalink.sendRawData(data);
+});
 
-  new SlashCommandBuilder()
-    .setName("queue")
-    .setDescription("Current music queue dekhe"),
+client.lavalink.nodeManager.on("connect", node => {
+  console.log("Lavalink connected:", node.id);
+});
 
-  new SlashCommandBuilder()
-    .setName("volume")
-    .setDescription("Music volume set kare")
-    .addIntegerOption(option =>
-      option
-        .setName("level")
-        .setDescription("Volume 1 se 247 tak")
-        .setMinValue(1)
-        .setMaxValue(247)
-        .setRequired(true)
-    ),
+client.lavalink.nodeManager.on("error", (node, error) => {
+  console.error("LAVALINK ERROR:", error);
+});
 
-  new SlashCommandBuilder()
-    .setName("loop")
-    .setDescription("Loop mode set kare")
-    .addStringOption(option =>
-      option
-        .setName("mode")
-        .setDescription("Loop mode")
-        .setRequired(true)
-        .addChoices(
-          { name: "Off", value: "off" },
-          { name: "Song", value: "track" },
-          { name: "Queue", value: "queue" }
-        )
-    )
-].map(command => command.toJSON());
+client.lavalink.on("trackStart", (player, track) => {
+  console.log("Now playing:", track?.info?.title);
+});
 
-client.on("raw", packet => {
-  client.lavalink.sendRawData(packet);
+client.lavalink.on("trackError", (player, track, payload) => {
+  console.error("TRACK ERROR:", track?.info?.title, payload);
 });
 
 client.once("ready", async () => {
@@ -316,7 +250,8 @@ client.once("ready", async () => {
 
   try {
     await client.lavalink.init({
-      ...client.user
+      id: client.user.id,
+      username: client.user.username
     });
 
     const rest = new REST({ version: "10" })
@@ -329,407 +264,392 @@ client.once("ready", async () => {
 
     console.log("DARK DJ commands registered!");
   } catch (error) {
-    console.error("Startup error:", error);
+    console.error("STARTUP ERROR:", error);
   }
 });
-
-// LAVALINK EVENTS
-
-client.lavalink.nodeManager.on("connect", node => {
-  console.log(`Lavalink connected: ${node.id}`);
-});
-
-client.lavalink.nodeManager.on("error", (node, error) => {
-  console.error(
-    `Lavalink node error (${node?.id || "unknown"}):`,
-    error?.message || error
-  );
-});
-
-client.lavalink.nodeManager.on("disconnect", (node, reason) => {
-  console.error(
-    `Lavalink disconnected (${node?.id || "unknown"}):`,
-    reason || "No reason supplied"
-  );
-});
-
-client.lavalink.on("trackStart", async (player, track) => {
-  console.log(`[TRACK START] ${trackTitle(track)}`);
-
-  try {
-    const channel = client.channels.cache.get(player.textChannelId);
-    if (!channel || !channel.isTextBased()) return;
-
-    await channel.send({
-      embeds: [makeNowPlayingEmbed(track, track?.requester)],
-      components: controlRows(player.guildId)
-    });
-  } catch (error) {
-    console.error("Now Playing message error:", error);
-  }
-});
-
-client.lavalink.on("trackError", (player, track, payload) => {
-  console.error(
-    `[TRACK ERROR] ${trackTitle(track)}`,
-    payload
-  );
-});
-
-client.lavalink.on("trackStuck", (player, track, payload) => {
-  console.error(
-    `[TRACK STUCK] ${trackTitle(track)}`,
-    payload
-  );
-});
-
-client.lavalink.on("trackEnd", (player, track, payload) => {
-  console.log(
-    `[TRACK END] ${trackTitle(track)}`,
-    payload?.reason || "ended"
-  );
-});
-
-client.lavalink.on("queueEnd", player => {
-  console.log(`[QUEUE END] ${player?.guildId || "unknown"}`);
-});
-
-// INTERACTIONS
 
 client.on("interactionCreate", async interaction => {
-  try {
-    // SEARCH SELECT MENU
 
-    if (
-      interaction.isStringSelectMenu() &&
-      interaction.customId.startsWith("djsearch:")
-    ) {
-      const [, ownerId, sessionId] =
-        interaction.customId.split(":");
+  // SEARCH MENU
+  if (
+    interaction.isStringSelectMenu() &&
+    interaction.customId.startsWith("darkdj_search_")
+  ) {
+    const sessionId = interaction.customId.slice("darkdj_search_".length);
+    const session = searchSessions.get(sessionId);
 
-      if (interaction.user.id !== ownerId) {
-        return interaction.reply({
-          content: "Ye search menu kisi aur user ka hai.",
-          ephemeral: true
-        });
-      }
+    if (!session) {
+      return interaction.reply({
+        content: "This search has expired. Run /play again.",
+        ephemeral: true
+      });
+    }
 
-      await interaction.deferUpdate();
+    if (interaction.user.id !== session.requesterId) {
+      return interaction.reply({
+        content: "Only the person who started this search can select a song.",
+        ephemeral: true
+      });
+    }
 
-      const session = searchSessions.get(sessionId);
+    await interaction.deferUpdate();
 
-      if (!session || session.ownerId !== interaction.user.id) {
+    try {
+      const selectedTrack = session.tracks[Number(interaction.values[0])];
+
+      if (!selectedTrack) {
         return interaction.editReply({
-          content: "Search expire ho gaya. Dobara /play use karo.",
-          embeds: [],
+          embeds: [makeEmbed("Song unavailable", "Run /play again.")],
           components: []
         });
       }
 
-      const track = session.tracks[Number(interaction.values[0])];
-
-      if (!track) {
-        return interaction.editReply({
-          content: "Selected song nahi mila.",
-          embeds: [],
-          components: []
-        });
-      }
-
-      const voiceChannel = interaction.member?.voice?.channel;
-
-      if (!voiceChannel) {
-        return interaction.editReply({
-          content: "Pehle voice channel me join karo.",
-          embeds: [],
-          components: []
-        });
-      }
-
-      let player = client.lavalink.getPlayer(interaction.guildId);
-
-      if (player && player.voiceChannelId !== voiceChannel.id) {
-        return interaction.editReply({
-          content: `Bot already <#${player.voiceChannelId}> me hai.`,
-          embeds: [],
-          components: []
-        });
-      }
+      const player = client.lavalink.getPlayer(interaction.guildId);
 
       if (!player) {
-        player = await client.lavalink.createPlayer({
-          guildId: interaction.guildId,
-          voiceChannelId: voiceChannel.id,
-          textChannelId: interaction.channelId,
-          selfDeaf: true,
-          volume: 100
+        return interaction.editReply({
+          embeds: [makeEmbed("Player unavailable", "Run /play again.")],
+          components: []
         });
       }
 
-      if (!player.connected) await player.connect();
+      player.queue.add(selectedTrack);
 
-      await player.queue.add(track);
-
-      if (!player.playing && !player.paused) {
+      if (!player.playing) {
         await player.play();
       }
 
       searchSessions.delete(sessionId);
 
       return interaction.editReply({
-        content: `Added to queue: **${trackTitle(track)}**`,
-        embeds: [],
-        components: []
+        embeds: [
+          makeEmbed(
+            "<:emoji_10:1570068905119195217> Added to DARK DJ",
+            `**${selectedTrack.info.title}**\n` +
+            `${selectedTrack.info.author || "Unknown artist"}\n` +
+            `${durationText(selectedTrack.info.length)}\n\n` +
+            `Requested by ${interaction.user}`
+          )
+        ],
+        components: playerControls()
+      });
+
+    } catch (error) {
+      console.error("SELECT MENU ERROR:", error);
+      return interaction.followUp({
+        content: "Could not add that song. Check bot and Lavalink logs.",
+        ephemeral: true
       });
     }
+  }
 
-    // PLAYER BUTTONS
+  // PLAYER BUTTONS
+  if (interaction.isButton() && interaction.customId.startsWith("darkdj_")) {
+    await interaction.deferUpdate();
 
-    if (
-      interaction.isButton() &&
-      interaction.customId.startsWith("dj:")
-    ) {
-      const [, guildId, action] =
-        interaction.customId.split(":");
+    try {
+      const player = client.lavalink.getPlayer(interaction.guildId);
 
-      if (guildId !== interaction.guildId) return;
-
-      await interaction.deferReply({ ephemeral: true });
-
-      const player = client.lavalink.getPlayer(guildId);
-
-      if (!player) {
-        return interaction.editReply("Music player active nahi hai.");
+      if (!player || !player.connected) {
+        return interaction.followUp({
+          content: "DARK DJ is not connected to voice.",
+          ephemeral: true
+        });
       }
 
-      const memberVoice = interaction.member?.voice?.channel;
+      const id = interaction.customId;
 
-      if (!memberVoice || memberVoice.id !== player.voiceChannelId) {
-        return interaction.editReply(
-          "Controls use karne ke liye bot ke voice channel me raho."
-        );
+      if (id === "darkdj_pause") {
+        await player.pause();
+        return interaction.followUp({ content: "Music paused.", ephemeral: true });
       }
 
-      if (action === "pause") {
-        if (!player.paused) await player.pause(true);
-      } else if (action === "resume") {
-        if (player.paused) await player.pause(false);
-      } else if (action === "skip") {
+      if (id === "darkdj_resume") {
+        await player.resume();
+        return interaction.followUp({ content: "Music resumed.", ephemeral: true });
+      }
+
+      if (id === "darkdj_skip") {
         await player.skip();
-      } else if (action === "shuffle") {
-        player.queue.shuffle();
-      } else if (action === "stop") {
-        await player.stopPlaying(true, false);
-      } else if (action === "vol_down") {
-        await player.setVolume(Math.max(1, (player.volume || 100) - 10));
-      } else if (action === "vol_up") {
-        await player.setVolume(Math.min(247, (player.volume || 100) + 10));
-      } else if (action === "disconnect") {
-        await player.destroy();
-        return interaction.editReply(
-          "DARK DJ voice channel se disconnect ho gaya."
-        );
+        return interaction.followUp({ content: "Song skipped.", ephemeral: true });
       }
 
-      return interaction.editReply(
-        `Done: ${action.replace("_", " ")}.`
-      );
+      if (id === "darkdj_shuffle") {
+        const count = await player.queue.shuffle();
+        return interaction.followUp({
+          content: count
+            ? `Shuffled ${count} queued songs.`
+            : "No queued songs to shuffle.",
+          ephemeral: true
+        });
+      }
+
+      if (id === "darkdj_stop") {
+        await player.stopPlaying(true);
+        return interaction.followUp({
+          content: "Playback stopped. Queue cleared. Bot stays in voice.",
+          ephemeral: true
+        });
+      }
+
+      if (id === "darkdj_disconnect") {
+        await player.stopPlaying(true);
+        await player.destroy();
+        return interaction.followUp({
+          content: "DARK DJ disconnected.",
+          ephemeral: true
+        });
+      }
+
+      if (id === "darkdj_vol_down" || id === "darkdj_vol_up") {
+        const current = Number(player.volume) || 100;
+        const next = id === "darkdj_vol_up"
+          ? current + 10
+          : current - 10;
+
+        const applied = await setPlayerVolume(player, next);
+
+        return interaction.followUp({
+          content: `Volume: **${applied}%**`,
+          ephemeral: true
+        });
+      }
+
+    } catch (error) {
+      console.error("BUTTON ERROR:", error);
+      return interaction.followUp({
+        content: "Control failed. Check bot logs.",
+        ephemeral: true
+      });
     }
+  }
 
-    if (!interaction.isChatInputCommand()) return;
+  if (!interaction.isChatInputCommand() || !interaction.guild) return;
 
-    const name = interaction.commandName;
-
+  try {
     await interaction.deferReply({ ephemeral: true });
 
-    // PLAY
+    const name = interaction.commandName;
+    const voice = getVoiceChannel(interaction);
 
-    if (name === "play") {
-      const query = interaction.options.getString("song", true);
-      const voiceChannel = interaction.member?.voice?.channel;
-
-      if (!voiceChannel) {
-        return interaction.editReply(
-          "Pehle kisi voice channel me join karo."
-        );
-      }
-
-      let player = client.lavalink.getPlayer(interaction.guildId);
-
-      if (player && player.voiceChannelId !== voiceChannel.id) {
-        return interaction.editReply(
-          `Bot already <#${player.voiceChannelId}> me hai.`
-        );
-      }
-
-      if (!player) {
-        player = await client.lavalink.createPlayer({
-          guildId: interaction.guildId,
-          voiceChannelId: voiceChannel.id,
-          textChannelId: interaction.channelId,
-          selfDeaf: true,
-          volume: 100
+    if (name === "play" || name === "join") {
+      if (!voice) {
+        return interaction.editReply({
+          embeds: [
+            makeEmbed("Voice Channel Required", "Join a voice channel first.")
+          ]
         });
       }
 
-      if (!player.connected) await player.connect();
+      const player = await getOrCreatePlayer(interaction, voice);
 
-      const result = await player.search(
-        { query, source: "ytmsearch" },
-        interaction.user
-      );
-
-      const tracks = (result?.tracks || []).slice(0, 10);
-
-      if (!tracks.length) {
-        return interaction.editReply(
-          "Koi playable result nahi mila. Dusra song name try karo."
-        );
+      if (name === "join") {
+        return interaction.editReply({
+          embeds: [
+            makeEmbed("<:emoji_10:1570068905119195217> DARK DJ", `Joined **${voice.name}**!`)
+          ]
+        });
       }
 
-      const sessionId = crypto.randomUUID();
+      const query = interaction.options.getString("song", true);
+
+      console.log("Searching song:", query);
+
+      const result = await player.search({ query }, interaction.user);
+
+      console.log("Search result:", result.loadType);
+
+      if (!result.tracks?.length) {
+        return interaction.editReply({
+          embeds: [
+            makeEmbed("No Results", "No playable SoundCloud results found.")
+          ]
+        });
+      }
+
+      const seen = new Set();
+
+      const tracks = result.tracks.filter(track => {
+        const key =
+          `${track.info?.title || ""}::${track.info?.author || ""}`.toLowerCase();
+
+        if (seen.has(key)) return false;
+
+        seen.add(key);
+        return true;
+      }).slice(0, 10);
+
+      const sessionId =
+        `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
 
       searchSessions.set(sessionId, {
-        ownerId: interaction.user.id,
-        tracks
+        tracks,
+        requesterId: interaction.user.id
       });
 
-      const options = tracks.map((track, index) => ({
-        label: `${index + 1}. ${trackTitle(track)}`.slice(0, 100),
-        description: `${track.info?.author || "Unknown artist"} • ${formatTime(track.info?.duration || track.info?.length)}`.slice(0, 100),
-        value: String(index)
-      }));
+      setTimeout(() => searchSessions.delete(sessionId), 120000);
 
       const menu = new StringSelectMenuBuilder()
-        .setCustomId(`djsearch:${interaction.user.id}:${sessionId}`)
-        .setPlaceholder("Apna song select karo")
-        .addOptions(options);
+        .setCustomId(`darkdj_search_${sessionId}`)
+        .setPlaceholder("Choose a song to play")
+        .addOptions(
+          tracks.map((track, index) => {
+            const info = track.info || {};
 
-      const embed = new EmbedBuilder()
-        .setColor(0x5865F2)
-        .setTitle("Search Results")
-        .setDescription(
-          tracks.map((track, index) =>
-            `**${index + 1}.** ${trackTitle(track)} — ${track.info?.author || "Unknown"}`
-          ).join("\n")
-        )
-        .setFooter({
-          text: "Ye menu sirf search karne wale user ke liye hai."
-        });
+            return new StringSelectMenuOptionBuilder()
+              .setLabel((info.title || "Unknown title").slice(0, 100))
+              .setDescription(
+                `${info.author || "Unknown artist"} | ${durationText(info.length)}`.slice(0, 100)
+              )
+              .setValue(String(index));
+          })
+        );
 
       return interaction.editReply({
-        embeds: [embed],
+        embeds: [
+          makeEmbed(
+            "DARK DJ | Search Results",
+            `Found **${tracks.length}** songs for **${query}**.\nSelect one below to add it to the player.`
+          )
+        ],
         components: [
           new ActionRowBuilder().addComponents(menu)
         ]
       });
     }
 
-    // JOIN
+    const player = client.lavalink.getPlayer(interaction.guildId);
 
-    if (name === "join") {
-      const player = await getPlayer(interaction, true);
+    if (name === "disconnect") {
+      if (!player) {
+        return interaction.editReply({
+          embeds: [makeEmbed("Not Connected", "DARK DJ is not connected.")]
+        });
+      }
 
-      return interaction.editReply(
-        `DARK DJ <#${player.voiceChannelId}> me join ho gaya.`
-      );
+      await player.stopPlaying(true);
+      await player.destroy();
+
+      return interaction.editReply({
+        embeds: [makeEmbed("Disconnected", "DARK DJ left the voice channel.")]
+      });
     }
 
-    // OTHER COMMANDS
+    if (!player || !player.connected) {
+      return interaction.editReply({
+        embeds: [
+          makeEmbed("No Music Player", "Use /play or /join first.")
+        ]
+      });
+    }
 
-    if (
-      ["pause", "resume", "skip", "stop", "disconnect", "queue", "volume", "loop"].includes(name)
-    ) {
-      const player = await getPlayer(interaction, false);
+    if (name === "pause") {
+      await player.pause();
+      return interaction.editReply({
+        embeds: [makeEmbed("Music Paused", "Playback paused.")]
+      });
+    }
 
-      if (name === "pause") {
-        if (!player.paused) await player.pause(true);
-        return interaction.editReply("Song pause kar diya.");
-      }
+    if (name === "resume") {
+      await player.resume();
+      return interaction.editReply({
+        embeds: [makeEmbed("Music Resumed", "Playback resumed.")]
+      });
+    }
 
-      if (name === "resume") {
-        if (player.paused) await player.pause(false);
-        return interaction.editReply("Song resume kar diya.");
-      }
+    if (name === "skip") {
+      await player.skip();
+      return interaction.editReply({
+        embeds: [makeEmbed("Skipped", "Moving to next song.")]
+      });
+    }
 
-      if (name === "skip") {
-        await player.skip();
-        return interaction.editReply("Song skip kar diya.");
-      }
+    if (name === "stop") {
+      await player.stopPlaying(true);
+      return interaction.editReply({
+        embeds: [
+          makeEmbed("Music Stopped", "Queue cleared. DARK DJ stays connected.")
+        ]
+      });
+    }
 
-      if (name === "stop") {
-        await player.stopPlaying(true, false);
-        return interaction.editReply(
-          "Playback stop aur queue clear kar di. Bot voice me rahega."
-        );
-      }
+    if (name === "volume") {
+      const requested = interaction.options.getInteger("level", true);
+      const applied = await setPlayerVolume(player, requested);
 
-      if (name === "disconnect") {
-        await player.destroy();
-        return interaction.editReply(
-          "DARK DJ voice channel se disconnect ho gaya."
-        );
-      }
-
-      if (name === "volume") {
-        const level = interaction.options.getInteger("level", true);
-        await player.setVolume(level);
-
-        return interaction.editReply(
-          `Volume **${level}%** set kar diya.`
-        );
-      }
-
-      if (name === "loop") {
-        const mode = interaction.options.getString("mode", true);
-        await player.setRepeatMode(mode);
-
-        return interaction.editReply(`Loop mode: **${mode}**`);
-      }
-
-      if (name === "queue") {
-        const current = player.queue.current;
-        const tracks = Array.isArray(player.queue.tracks)
-          ? player.queue.tracks
-          : [];
-
-        const lines = tracks.slice(0, 15).map((track, index) =>
-          `**${index + 1}.** ${trackTitle(track)} \`[${formatTime(track.info?.duration || track.info?.length)}]\``
-        );
-
-        const embed = new EmbedBuilder()
-          .setColor(0x5865F2)
-          .setTitle("Music Queue")
-          .setDescription(
-            (current ? `**Now Playing:** ${trackTitle(current)}\n\n` : "") +
-            (lines.length ? lines.join("\n") : "Queue me aur songs nahi hain.")
+      return interaction.editReply({
+        embeds: [
+          makeEmbed(
+            "Volume Updated",
+            `Volume set to **${applied}%**. High volume may distort audio.`
           )
-          .setFooter({
-            text: `Upcoming tracks: ${tracks.length}`
-          });
+        ]
+      });
+    }
 
-        return interaction.editReply({ embeds: [embed] });
+    if (name === "queue") {
+      const current = player.queue.current;
+      const tracks = player.queue.tracks.slice(0, 10);
+
+      const list = tracks.length
+        ? tracks.map((track, index) =>
+            `**${index + 1}.** ${track.info?.title || "Unknown"} | ${track.info?.author || "Unknown artist"}`
+          ).join("\n")
+        : "No upcoming songs.";
+
+      return interaction.editReply({
+        embeds: [
+          makeEmbed(
+            "DARK DJ Queue",
+            `**Now Playing:** ${current?.info?.title || "Nothing"}\n\n**Up Next:**\n${list}`
+          )
+        ]
+      });
+    }
+
+    if (name === "loop") {
+      const mode = interaction.options.getString("mode", true);
+
+      if (typeof player.setLoop !== "function") {
+        return interaction.editReply({
+          embeds: [
+            makeEmbed(
+              "Loop Not Supported",
+              "Your installed lavalink-client version does not expose setLoop()."
+            )
+          ]
+        });
       }
+
+      const loopValue =
+        mode === "song" ? "track" :
+        mode === "queue" ? "queue" : "none";
+
+      await player.setLoop(loopValue);
+
+      return interaction.editReply({
+        embeds: [
+          makeEmbed("Loop Updated", `Loop mode set to **${mode.toUpperCase()}**.`)
+        ]
+      });
     }
 
   } catch (error) {
-    console.error("INTERACTION ERROR:", error);
+    console.error("COMMAND ERROR:", error);
 
-    const message = error?.message || "Unexpected error.";
-
-    if (interaction.deferred || interaction.replied) {
-      return interaction.followUp({
-        content: `Error: ${message}`,
-        ephemeral: true
-      }).catch(() => {});
+    try {
+      await interaction.editReply({
+        embeds: [
+          makeEmbed(
+            "Command Error",
+            "Command failed. Check ACLClouds and Lavalink logs."
+          )
+        ]
+      });
+    } catch (replyError) {
+      console.error("REPLY ERROR:", replyError);
     }
-
-    return interaction.reply({
-      content: `Error: ${message}`,
-      ephemeral: true
-    }).catch(() => {});
   }
 });
 
 client.login(process.env.DISCORD_TOKEN);
-          
