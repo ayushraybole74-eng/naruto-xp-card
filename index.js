@@ -1,3 +1,4 @@
+
 require("dotenv").config();
 
 const {
@@ -52,7 +53,7 @@ const secure =
   String(process.env.LAVALINK_SECURE || "true").toLowerCase() === "true";
 
 // ===================================
-// LAVALINK CONNECTION
+// LAVALINK
 // ===================================
 
 let lavalinkNodeReady = false;
@@ -70,11 +71,7 @@ function waitForLavalink(timeoutMs = 20000) {
 
     const timer = setTimeout(() => {
       lavalinkWaiters.delete(onReady);
-      reject(
-        new Error(
-          "Lavalink connect nahi hua. Thodi der baad dobara try karo."
-        )
-      );
+      reject(new Error("Lavalink connect nahi hua. Dobara try karo."));
     }, timeoutMs);
 
     lavalinkWaiters.add(onReady);
@@ -127,10 +124,11 @@ client.lavalink = new LavalinkManager({
 });
 
 // ===================================
-// SEARCH SESSIONS
+// STORAGE
 // ===================================
 
 const searchSessions = new Map();
+const buttonLocks = new Set();
 
 // ===================================
 // HELPERS
@@ -162,7 +160,9 @@ function trackDuration(track) {
 }
 
 function getTrackImage(track) {
-  return track?.info?.artworkUrl || track?.info?.thumbnail || null;
+  return track?.info?.artworkUrl ||
+    track?.info?.thumbnail ||
+    null;
 }
 
 function getRequesterText(requester) {
@@ -171,22 +171,27 @@ function getRequesterText(requester) {
 }
 
 async function safeEditReply(interaction, content) {
-  if (interaction.isRepliable()) {
-    try {
-      if (interaction.deferred || interaction.replied) {
-        return await interaction.editReply({ content });
-      }
+  try {
+    if (!interaction.isRepliable()) return;
 
-      return await interaction.reply({
+    if (interaction.deferred || interaction.replied) {
+      await interaction.editReply({ content });
+    } else {
+      await interaction.reply({
         content,
         ephemeral: true
       });
-    } catch (error) {
-      if (error.code !== 10062 && error.code !== 40060) {
-        console.error("Reply error:", error);
-      }
+    }
+  } catch (error) {
+    if (error.code !== 10062 && error.code !== 40060) {
+      console.error("Reply error:", error);
     }
   }
+}
+
+function makeTrackRequester(track, requester) {
+  track.requester = requester;
+  return track;
 }
 
 // ===================================
@@ -194,8 +199,7 @@ async function safeEditReply(interaction, content) {
 // ===================================
 
 function makeNowPlayingEmbed(track, requester) {
-  const info = track?.info || {};
-  const url = info.uri;
+  const url = trackUrl(track);
   const title = trackTitle(track);
 
   const songLine = url
@@ -224,15 +228,13 @@ function makeNowPlayingEmbed(track, requester) {
 
   const image = getTrackImage(track);
 
-  if (image) {
-    embed.setThumbnail(image);
-  }
+  if (image) embed.setThumbnail(image);
 
   return embed;
 }
 
 // ===================================
-// ENQUEUED TRACK EMBED
+// ENQUEUED EMBED
 // ===================================
 
 function makeEnqueuedEmbed(track, requester, position) {
@@ -272,9 +274,7 @@ function makeEnqueuedEmbed(track, requester, position) {
 
   const image = getTrackImage(track);
 
-  if (image) {
-    embed.setThumbnail(image);
-  }
+  if (image) embed.setThumbnail(image);
 
   return embed;
 }
@@ -336,9 +336,7 @@ function controlRows(guildId) {
 // ===================================
 
 async function getPlayer(interaction, connectIfNeeded = false) {
-  if (connectIfNeeded) {
-    await waitForLavalink();
-  }
+  if (connectIfNeeded) await waitForLavalink();
 
   const voiceChannel = interaction.member?.voice?.channel;
 
@@ -369,9 +367,7 @@ async function getPlayer(interaction, connectIfNeeded = false) {
   }
 
   if (!player) {
-    throw new Error(
-      "Music player active nahi hai. Pehle /join ya /play use karo."
-    );
+    throw new Error("Music player active nahi hai. Pehle /join use karo.");
   }
 
   if (connectIfNeeded && !player.connected) {
@@ -381,6 +377,22 @@ async function getPlayer(interaction, connectIfNeeded = false) {
   return player;
 }
 
+async function addTrackToQueue(player, track, requester) {
+  makeTrackRequester(track, requester);
+
+  const position =
+    (player.queue.tracks?.length || 0) +
+    (player.playing || player.paused ? 2 : 1);
+
+  await player.queue.add(track);
+
+  if (!player.playing && !player.paused) {
+    await player.play();
+  }
+
+  return position;
+}
+
 // ===================================
 // SLASH COMMANDS
 // ===================================
@@ -388,7 +400,7 @@ async function getPlayer(interaction, connectIfNeeded = false) {
 const commands = [
   new SlashCommandBuilder()
     .setName("join")
-    .setDescription("Bot ko aapke voice channel me join karaye"),
+    .setDescription("Bot ko voice channel me join karaye"),
 
   new SlashCommandBuilder()
     .setName("play")
@@ -453,7 +465,7 @@ const commands = [
 ].map(command => command.toJSON());
 
 // ===================================
-// DISCORD RAW EVENTS
+// RAW DISCORD EVENTS
 // ===================================
 
 client.on("raw", packet => {
@@ -617,7 +629,7 @@ client.on("interactionCreate", async interaction => {
 
       if (!track) {
         return interaction.editReply({
-          content: "Selected song nahi mila. Dobara /play use karo.",
+          content: "Selected song nahi mila.",
           embeds: [],
           components: []
         });
@@ -627,52 +639,13 @@ client.on("interactionCreate", async interaction => {
 
       await waitForLavalink();
 
-      const voiceChannel = interaction.member?.voice?.channel;
+      const player = await getPlayer(interaction, true);
 
-      if (!voiceChannel) {
-        return interaction.editReply({
-          content: "Pehle voice channel me join karo.",
-          embeds: [],
-          components: []
-        });
-      }
-
-      let player = client.lavalink.getPlayer(interaction.guildId);
-
-      if (
-        player &&
-        player.voiceChannelId !== voiceChannel.id
-      ) {
-        return interaction.editReply({
-          content: `Bot already <#${player.voiceChannelId}> me hai.`,
-          embeds: [],
-          components: []
-        });
-      }
-
-      if (!player) {
-        player = await client.lavalink.createPlayer({
-          guildId: interaction.guildId,
-          voiceChannelId: voiceChannel.id,
-          textChannelId: interaction.channelId,
-          selfDeaf: true,
-          volume: 100
-        });
-      }
-
-      if (!player.connected) {
-        await player.connect();
-      }
-
-      const position =
-        (player.queue.tracks?.length || 0) +
-        (player.playing || player.paused ? 2 : 1);
-
-      await player.queue.add(track);
-
-      if (!player.playing && !player.paused) {
-        await player.play();
-      }
+      const position = await addTrackToQueue(
+        player,
+        track,
+        interaction.user
+      );
 
       await interaction.editReply({
         content: "Song selected.",
@@ -683,10 +656,7 @@ client.on("interactionCreate", async interaction => {
       const publicChannel =
         client.channels.cache.get(interaction.channelId);
 
-      if (
-        publicChannel &&
-        publicChannel.isTextBased()
-      ) {
+      if (publicChannel?.isTextBased()) {
         await publicChannel.send({
           embeds: [
             makeEnqueuedEmbed(
@@ -718,84 +688,98 @@ client.on("interactionCreate", async interaction => {
         ephemeral: true
       });
 
-      await waitForLavalink();
+      const lockKey = `${guildId}:${action}`;
 
-      const player =
-        client.lavalink.getPlayer(guildId);
-
-      if (!player) {
+      if (buttonLocks.has(guildId)) {
         return interaction.editReply({
-          content: "Music player active nahi hai."
+          content: "Ek control action already process ho raha hai."
         });
       }
 
-      const memberVoice =
-        interaction.member?.voice?.channel;
+      buttonLocks.add(guildId);
 
-      if (
-        !memberVoice ||
-        memberVoice.id !== player.voiceChannelId
-      ) {
-        return interaction.editReply({
-          content: "Controls use karne ke liye bot ke voice channel me raho."
-        });
-      }
+      try {
+        await waitForLavalink();
 
-      if (action === "pause") {
-        if (player.paused) {
+        const player = client.lavalink.getPlayer(guildId);
+
+        if (!player) {
           return interaction.editReply({
-            content: "Song already paused hai."
+            content: "Music player active nahi hai."
           });
         }
 
-        await player.pause(true);
-      }
+        const memberVoice =
+          interaction.member?.voice?.channel;
 
-      else if (action === "resume") {
-        if (!player.paused) {
+        if (
+          !memberVoice ||
+          memberVoice.id !== player.voiceChannelId
+        ) {
           return interaction.editReply({
-            content: "Song already playing hai."
+            content: "Controls use karne ke liye bot ke voice channel me raho."
           });
         }
 
-        await player.pause(false);
-      }
+        if (action === "pause") {
+          if (player.paused) {
+            return interaction.editReply({
+              content: "Song already paused hai."
+            });
+          }
 
-      else if (action === "skip") {
-        await player.skip();
-      }
+          await player.pause();
+        }
 
-      else if (action === "shuffle") {
-        player.queue.shuffle();
-      }
+        else if (action === "resume") {
+          if (!player.paused) {
+            return interaction.editReply({
+              content: "Song already playing hai."
+            });
+          }
 
-      else if (action === "stop") {
-        await player.stopPlaying(true, false);
-      }
+          await player.resume();
+        }
 
-      else if (action === "vol_down") {
-        await player.setVolume(
-          Math.max(1, (player.volume || 100) - 10)
-        );
-      }
+        else if (action === "skip") {
+          await player.skip();
+        }
 
-      else if (action === "vol_up") {
-        await player.setVolume(
-          Math.min(247, (player.volume || 100) + 10)
-        );
-      }
+        else if (action === "shuffle") {
+          player.queue.shuffle();
+        }
 
-      else if (action === "disconnect") {
-        await player.destroy();
+        else if (action === "stop") {
+          await player.stopPlaying(true, false);
+        }
+
+        else if (action === "vol_down") {
+          await player.setVolume(
+            Math.max(1, (player.volume || 100) - 10)
+          );
+        }
+
+        else if (action === "vol_up") {
+          await player.setVolume(
+            Math.min(247, (player.volume || 100) + 10)
+          );
+        }
+
+        else if (action === "disconnect") {
+          await player.destroy();
+
+          return interaction.editReply({
+            content: "DARK DJ voice channel se disconnect ho gaya."
+          });
+        }
 
         return interaction.editReply({
-          content: "DARK DJ voice channel se disconnect ho gaya."
+          content: `Done: ${action.replace("_", " ")}.`
         });
-      }
 
-      return interaction.editReply({
-        content: `Done: ${action.replace("_", " ")}.`
-      });
+      } finally {
+        buttonLocks.delete(guildId);
+      }
     }
 
     // ===================================
@@ -806,11 +790,9 @@ client.on("interactionCreate", async interaction => {
 
     const name = interaction.commandName;
 
-    if (!interaction.deferred && !interaction.replied) {
-      await interaction.deferReply({
-        ephemeral: true
-      });
-    }
+    await interaction.deferReply({
+      ephemeral: true
+    });
 
     await waitForLavalink();
 
@@ -843,19 +825,38 @@ client.on("interactionCreate", async interaction => {
         });
       }
 
-      let player =
-        client.lavalink.getPlayer(interaction.guildId);
+      const player = await getPlayer(interaction, true);
 
-      if (
-        player &&
-        player.voiceChannelId !== voiceChannel.id
-      ) {
+      const result = await player.search(
+        { query },
+        interaction.user
+      );
+
+      const tracks = result?.tracks || [];
+
+      if (!tracks.length) {
         return interaction.editReply({
-          content: `Bot already <#${player.voiceChannelId}> me hai.`
+          content: "Koi song nahi mila. Dusra naam try karo."
         });
       }
 
-      if (!player) {
-        player = await client.lavalink.createPlayer({
-          guildId: interaction.guildId,
-          voiceChannel
+      // Single result: direct queue
+      if (tracks.length === 1) {
+        const track = tracks[0];
+
+        const position = await addTrackToQueue(
+          player,
+          track,
+          interaction.user
+        );
+
+        await interaction.editReply({
+          content: "Song queue me add kar diya."
+        });
+
+        const channel =
+          client.channels.cache.get(interaction.channelId);
+
+        if (channel?.isTextBased()) {
+          await channel.send({
+            em
