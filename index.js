@@ -866,5 +866,190 @@ client.on("interactionCreate", async interaction => {
 
         const channel =
           client.channels.cache.get(interaction.channelId);
-
         
+        if (channel?.isTextBased()) {
+          await channel.send({
+            embeds: [
+              makeEnqueuedEmbed(
+                track,
+                interaction.user,
+                position
+              )
+            ]
+          });
+        }
+
+        return;
+      }
+
+      // Multiple results: show search menu
+      const sessionId = crypto.randomUUID();
+
+      searchSessions.set(sessionId, {
+        ownerId: interaction.user.id,
+        tracks: tracks.slice(0, 10)
+      });
+
+      const menu = new StringSelectMenuBuilder()
+        .setCustomId(`djsearch:${interaction.user.id}:${sessionId}`)
+        .setPlaceholder("Select a song")
+        .addOptions(
+          tracks.slice(0, 10).map((track, index) => ({
+            label: trackTitle(track).slice(0, 100),
+            description: `Duration: ${formatTime(trackDuration(track))}`.slice(0, 100),
+            value: String(index)
+          }))
+        );
+
+      return interaction.editReply({
+        content: "Apna song select karo:",
+        components: [
+          new ActionRowBuilder().addComponents(menu)
+        ]
+      });
+    }
+
+    // ===================================
+    // OTHER MUSIC COMMANDS
+    // ===================================
+
+    const player = await getPlayer(interaction, false);
+
+    if (name === "pause") {
+      if (player.paused) {
+        return interaction.editReply({
+          content: "Song already paused hai."
+        });
+      }
+
+      await player.pause(true);
+
+      return interaction.editReply({
+        content: "Song pause kar diya."
+      });
+    }
+
+    if (name === "resume") {
+      if (!player.paused) {
+        return interaction.editReply({
+          content: "Song already playing hai."
+        });
+      }
+
+      await player.pause(false);
+
+      return interaction.editReply({
+        content: "Song resume kar diya."
+      });
+    }
+
+    if (name === "skip") {
+      await player.skip();
+
+      return interaction.editReply({
+        content: "Song skip kar diya."
+      });
+    }
+
+    if (name === "stop") {
+      await player.stopPlaying(true, false);
+
+      return interaction.editReply({
+        content: "Song stop aur queue clear kar di."
+      });
+    }
+
+    if (name === "disconnect") {
+      await player.destroy();
+
+      return interaction.editReply({
+        content: "DARK DJ disconnect ho gaya."
+      });
+    }
+
+    if (name === "volume") {
+      const volume = interaction.options.getInteger("level", true);
+
+      await player.setVolume(volume);
+
+      return interaction.editReply({
+        content: `Volume ${volume}% set kar diya.`
+      });
+    }
+
+    if (name === "loop") {
+      const mode = interaction.options.getString("mode", true);
+
+      await player.setLoop(mode);
+
+      return interaction.editReply({
+        content: `Loop mode: ${mode}`
+      });
+    }
+
+    if (name === "queue") {
+      const current = player.queue.current;
+      const tracks = player.queue.tracks || [];
+
+      if (!current && !tracks.length) {
+        return interaction.editReply({
+          content: "Queue empty hai."
+        });
+      }
+
+      const description = [];
+
+      if (current) {
+        const url = trackUrl(current);
+
+        description.push(
+          url
+            ? `**Now Playing:** [${trackTitle(current)}](${url})`
+            : `**Now Playing:** ${trackTitle(current)}`
+        );
+      }
+
+      if (tracks.length) {
+        description.push("\n**Up Next:**");
+
+        tracks.slice(0, 10).forEach((track, index) => {
+          const url = trackUrl(track);
+
+          description.push(
+            url
+              ? `\`${index + 1}.\` [${trackTitle(track)}](${url})`
+              : `\`${index + 1}.\` ${trackTitle(track)}`
+          );
+        });
+      }
+
+      const embed = new EmbedBuilder()
+        .setColor(0x5865F2)
+        .setTitle("DARK DJ • Music Queue")
+        .setDescription(description.join("\n").slice(0, 4000))
+        .setFooter({
+          text: `${tracks.length} song(s) in queue`
+        });
+
+      return interaction.editReply({
+        embeds: [embed]
+      });
+    }
+
+  } catch (error) {
+    console.error("INTERACTION ERROR:", error);
+
+    await safeEditReply(
+      interaction,
+      error.message || "Music command mein error aa gaya."
+    );
+  }
+});
+
+// ===================================
+// LOGIN
+// ===================================
+
+client.login(process.env.DISCORD_TOKEN);
+
+      
