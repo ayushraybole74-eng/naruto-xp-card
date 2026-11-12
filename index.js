@@ -53,30 +53,18 @@ const secure =
   String(process.env.LAVALINK_SECURE || "true").toLowerCase() === "true";
 
 // ===================================
-// LAVALINK
+// STORAGE
 // ===================================
+
+const searchSessions = new Map();
+const buttonLocks = new Set();
 
 let lavalinkNodeReady = false;
 const lavalinkWaiters = new Set();
 
-function waitForLavalink(timeoutMs = 20000) {
-  if (lavalinkNodeReady) return Promise.resolve();
-
-  return new Promise((resolve, reject) => {
-    const onReady = () => {
-      clearTimeout(timer);
-      lavalinkWaiters.delete(onReady);
-      resolve();
-    };
-
-    const timer = setTimeout(() => {
-      lavalinkWaiters.delete(onReady);
-      reject(new Error("Lavalink connect nahi hua. Dobara try karo."));
-    }, timeoutMs);
-
-    lavalinkWaiters.add(onReady);
-  });
-}
+// ===================================
+// LAVALINK
+// ===================================
 
 client.lavalink = new LavalinkManager({
   nodes: [
@@ -124,18 +112,38 @@ client.lavalink = new LavalinkManager({
 });
 
 // ===================================
-// STORAGE
+// WAIT FOR LAVALINK
 // ===================================
 
-const searchSessions = new Map();
-const buttonLocks = new Set();
+function waitForLavalink(timeoutMs = 20000) {
+  if (lavalinkNodeReady) {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve, reject) => {
+    const onReady = () => {
+      clearTimeout(timer);
+      lavalinkWaiters.delete(onReady);
+      resolve();
+    };
+
+    const timer = setTimeout(() => {
+      lavalinkWaiters.delete(onReady);
+      reject(new Error("Lavalink connect nahi hua. Dobara try karo."));
+    }, timeoutMs);
+
+    lavalinkWaiters.add(onReady);
+  });
+}
 
 // ===================================
 // HELPERS
 // ===================================
 
 function formatTime(ms) {
-  if (!Number.isFinite(ms) || ms <= 0) return "Live";
+  if (!Number.isFinite(ms) || ms <= 0) {
+    return "Live";
+  }
 
   const total = Math.floor(ms / 1000);
   const hours = Math.floor(total / 3600);
@@ -160,14 +168,24 @@ function trackDuration(track) {
 }
 
 function getTrackImage(track) {
-  return track?.info?.artworkUrl ||
+  return (
+    track?.info?.artworkUrl ||
     track?.info?.thumbnail ||
-    null;
+    null
+  );
 }
 
 function getRequesterText(requester) {
   if (!requester) return "Unknown";
-  return `<@${requester.id || requester}>`;
+
+  return requester.id
+    ? `<@${requester.id}>`
+    : `<@${requester}>`;
+}
+
+function makeTrackRequester(track, requester) {
+  track.requester = requester;
+  return track;
 }
 
 async function safeEditReply(interaction, content) {
@@ -187,11 +205,6 @@ async function safeEditReply(interaction, content) {
       console.error("Reply error:", error);
     }
   }
-}
-
-function makeTrackRequester(track, requester) {
-  track.requester = requester;
-  return track;
 }
 
 // ===================================
@@ -228,7 +241,9 @@ function makeNowPlayingEmbed(track, requester) {
 
   const image = getTrackImage(track);
 
-  if (image) embed.setThumbnail(image);
+  if (image) {
+    embed.setThumbnail(image);
+  }
 
   return embed;
 }
@@ -249,7 +264,7 @@ function makeEnqueuedEmbed(track, requester, position) {
     .setColor(0x5865F2)
     .setTitle("<:emoji_10:1570068905119195217> Enqueued Track")
     .setDescription(
-      `<:emoji_11:1570264742826606693> **${songName}** to the queue`
+      `<:emoji_11:1570264742826606693> **${songName}** added to the queue`
     )
     .addFields(
       {
@@ -274,7 +289,9 @@ function makeEnqueuedEmbed(track, requester, position) {
 
   const image = getTrackImage(track);
 
-  if (image) embed.setThumbnail(image);
+  if (image) {
+    embed.setThumbnail(image);
+  }
 
   return embed;
 }
@@ -336,8 +353,6 @@ function controlRows(guildId) {
 // ===================================
 
 async function getPlayer(interaction, connectIfNeeded = false) {
-  if (connectIfNeeded) await waitForLavalink();
-
   const voiceChannel = interaction.member?.voice?.channel;
 
   if (!voiceChannel) {
@@ -613,10 +628,7 @@ client.on("interactionCreate", async interaction => {
 
       const session = searchSessions.get(sessionId);
 
-      if (
-        !session ||
-        session.ownerId !== interaction.user.id
-      ) {
+      if (!session || session.ownerId !== interaction.user.id) {
         return interaction.editReply({
           content: "Search expire ho gaya. Dobara /play use karo.",
           embeds: [],
@@ -688,8 +700,6 @@ client.on("interactionCreate", async interaction => {
         ephemeral: true
       });
 
-      const lockKey = `${guildId}:${action}`;
-
       if (buttonLocks.has(guildId)) {
         return interaction.editReply({
           content: "Ek control action already process ho raha hai."
@@ -728,7 +738,7 @@ client.on("interactionCreate", async interaction => {
             });
           }
 
-          await player.pause();
+          await player.pause(true);
         }
 
         else if (action === "resume") {
@@ -738,7 +748,7 @@ client.on("interactionCreate", async interaction => {
             });
           }
 
-          await player.resume();
+          await player.pause(false);
         }
 
         else if (action === "skip") {
@@ -857,6 +867,184 @@ client.on("interactionCreate", async interaction => {
         const channel =
           client.channels.cache.get(interaction.channelId);
 
-        if (channel?.isTextBased()) {
+              if (channel?.isTextBased()) {
           await channel.send({
-            em
+            embeds: [
+              makeEnqueuedEmbed(
+                track,
+                interaction.user,
+                position
+              )
+            ]
+          });
+        }
+
+        return;
+      }
+
+      // Multiple search results
+      const sessionId = crypto.randomUUID();
+
+      searchSessions.set(sessionId, {
+        ownerId: interaction.user.id,
+        tracks: tracks.slice(0, 5)
+      });
+
+      const menu = new StringSelectMenuBuilder()
+        .setCustomId(`djsearch:${interaction.user.id}:${sessionId}`)
+        .setPlaceholder("Select a song")
+        .addOptions(
+          tracks.slice(0, 5).map((track, index) => ({
+            label: trackTitle(track).slice(0, 100),
+            description: `Duration: ${formatTime(trackDuration(track))}`.slice(0, 100),
+            value: String(index)
+          }))
+        );
+
+      const row = new ActionRowBuilder().addComponents(menu);
+
+      return interaction.editReply({
+        content: "Search results — apna song select karo:",
+        components: [row]
+      });
+    }
+
+    // OTHER PLAYER COMMANDS
+    const player = await getPlayer(interaction, false);
+
+    if (name === "pause") {
+      if (player.paused) {
+        return interaction.editReply({
+          content: "Song already paused hai."
+        });
+      }
+
+      await player.pause(true);
+
+      return interaction.editReply({
+        content: "Song pause kar diya."
+      });
+    }
+
+    if (name === "resume") {
+      if (!player.paused) {
+        return interaction.editReply({
+          content: "Song already playing hai."
+        });
+      }
+
+      await player.pause(false);
+
+      return interaction.editReply({
+        content: "Song resume kar diya."
+      });
+    }
+
+    if (name === "skip") {
+      await player.skip();
+
+      return interaction.editReply({
+        content: "Song skip kar diya."
+      });
+    }
+
+    if (name === "stop") {
+      await player.stopPlaying(true, false);
+
+      return interaction.editReply({
+        content: "Playback stop aur queue clear kar di."
+      });
+    }
+
+    if (name === "disconnect") {
+      await player.destroy();
+
+      return interaction.editReply({
+        content: "DARK DJ disconnect ho gaya."
+      });
+    }
+
+    if (name === "volume") {
+      const level = interaction.options.getInteger("level", true);
+
+      await player.setVolume(level);
+
+      return interaction.editReply({
+        content: `Volume ${level}% set kar diya.`
+      });
+    }
+
+    if (name === "loop") {
+      const mode = interaction.options.getString("mode", true);
+
+      if (typeof player.setRepeatMode === "function") {
+        await player.setRepeatMode(mode);
+      } else if (typeof player.setLoop === "function") {
+        await player.setLoop(mode);
+      } else {
+        throw new Error("Loop method available nahi hai.");
+      }
+
+      return interaction.editReply({
+        content: `Loop mode: ${mode}`
+      });
+    }
+
+    if (name === "queue") {
+      const tracks = player.queue.tracks || [];
+      const current = player.queue.current;
+
+      if (!tracks.length && !current) {
+        return interaction.editReply({
+          content: "Queue abhi empty hai."
+        });
+      }
+
+      let description = "";
+
+      if (current) {
+        description += `**Now Playing:**\n${trackTitle(current)}\n\n`;
+      }
+
+      if (tracks.length) {
+        description += "**Up Next:**\n";
+
+        description += tracks
+          .slice(0, 10)
+          .map((track, index) =>
+            `**${index + 1}.** ${trackTitle(track)} — ${formatTime(trackDuration(track))}`
+          )
+          .join("\n");
+      }
+
+      if (tracks.length > 10) {
+        description += `\n\nAnd ${tracks.length - 10} more songs...`;
+      }
+
+      const embed = new EmbedBuilder()
+        .setColor(0x5865F2)
+        .setTitle("DARK DJ • Music Queue")
+        .setDescription(description.slice(0, 4000))
+        .setFooter({
+          text: `Total upcoming songs: ${tracks.length}`
+        });
+
+      return interaction.editReply({
+        embeds: [embed]
+      });
+    }
+
+  } catch (error) {
+    console.error("COMMAND ERROR:", error);
+
+    await safeEditReply(
+      interaction,
+      `Error: ${error.message || "Something went wrong."}`
+    );
+  }
+});
+
+// LOGIN
+client.login(process.env.DISCORD_TOKEN).catch(error => {
+  console.error("DISCORD LOGIN ERROR:", error);
+});
